@@ -66,12 +66,13 @@ TOOL_DEFINITIONS = {
         },
         {
             "name": "theHarvester",
-            "desc": "Emails, subdomínios, IPs via OSINT",
+            "desc": "Emails, subdomínios, IPs via OSINT (só para domínios públicos)",
             "params": [
-                {"key": "dominio", "label": "Domínio alvo",    "default": "{TARGET}"},
-                {"key": "fonte",   "label": "Fonte (all/google/bing)", "default": "all"},
+                {"key": "dominio", "label": "Domínio alvo (ex: empresa.com)", "default": "{TARGET}"},
+                {"key": "fonte",   "label": "Fontes", "default": "google,bing,duckduckgo,crtsh,hackertarget,rapiddns"},
             ],
             "cmd": "theHarvester -d {dominio} -b {fonte}",
+            "smart_check": "harvester",
         },
         {
             "name": "netdiscover",
@@ -178,33 +179,6 @@ TOOL_DEFINITIONS = {
                 {"key": "output",   "label": "Ficheiro output",                    "default": "ferox_{TARGET}.txt"},
             ],
             "cmd": "feroxbuster -u {url} -w {wordlist} -x {ext} -d {depth} -o {output}",
-        },
-        {
-            "name": "ffuf",
-            "desc": "Fuzzing rápido de directorias, parâmetros e vhosts",
-            "hints": [
-                "💡 FFUF é o fuzzer mais rápido — ideal para CTFs e labs",
-                "💡 Usa FUZZ como placeholder na URL onde queres fazer fuzzing",
-                "💡 Exemplo directorias: http://alvo/FUZZ",
-                "💡 Exemplo parâmetros: http://alvo/page.php?id=FUZZ",
-                "💡 Exemplo vhosts: usa -H 'Host: FUZZ.dominio.com' com -w subdomains.txt",
-                "💡 -fc 404 filtra respostas 404 (não encontrado)",
-                "💡 -fc 403,404 filtra múltiplos códigos",
-                "💡 -mc 200 mostra só respostas 200 (OK)",
-                "💡 -t 50 define 50 threads (mais rápido, mais ruído)",
-                "💡 Wordlists recomendadas:",
-                "     /usr/share/wordlists/dirb/common.txt  (rápida)",
-                "     /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt (completa)",
-            ],
-            "params": [
-                {"key": "url",      "label": "URL com FUZZ (ex: http://192.168.1.1/FUZZ)", "default": "http://{TARGET}/FUZZ"},
-                {"key": "wordlist", "label": "Wordlist",                                    "default": "/usr/share/wordlists/dirb/common.txt"},
-                {"key": "ext",      "label": "Extensões (ex: php,html,txt — ENTER para saltar)", "default": ""},
-                {"key": "fc",       "label": "Filtrar códigos HTTP (ex: 404 ou 403,404)",   "default": "404"},
-                {"key": "threads",  "label": "Threads (velocidade)",                         "default": "40"},
-                {"key": "output",   "label": "Ficheiro output",                              "default": "ffuf_{TARGET}.txt"},
-            ],
-            "cmd": "ffuf -u {url} -w {wordlist} -e {ext} -fc {fc} -t {threads} -o {output}",
         },
         {
             "name": "dirb",
@@ -652,6 +626,7 @@ PROJECT = {
     "phases": {str(i): {} for i in range(1, 8)},
 }
 PROJECT_FILE = ""
+PROJECTS_DIR = os.path.expanduser("~/reaper_projects")
 
 # ── Utilitários ─────────────────────────────────────────────
 def clear():
@@ -662,8 +637,14 @@ def pause():
     input()
 
 def save_project():
+    global PROJECT_FILE
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
     if PROJECT_FILE:
-        with open(PROJECT_FILE, "w") as f:
+        # Always save in PROJECTS_DIR
+        fname = os.path.basename(PROJECT_FILE)
+        full_path = os.path.join(PROJECTS_DIR, fname)
+        PROJECT_FILE = full_path
+        with open(full_path, "w") as f:
             json.dump(PROJECT, f, indent=2, ensure_ascii=False)
 
 def resolve_defaults(params, target):
@@ -753,32 +734,70 @@ def new_project():
                "phases": {str(i): {} for i in range(1, 8)}}
     PROJECT["phases"]["1"]["alvo_ip"] = target
     safe = name.replace(" ","_").replace("/","-")
-    PROJECT_FILE = f"reaper_{safe}_{date}.json"
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    PROJECT_FILE = os.path.join(PROJECTS_DIR, f"reaper_{safe}_{date}.json")
     save_project()
     console.print(f"\n[green]✔ Projecto criado:[/green] [bold]{PROJECT_FILE}[/bold]")
+    console.print(f"[dim]Guardado em: {PROJECTS_DIR}[/dim]")
     pause()
 
 def load_project_menu():
     global PROJECT, PROJECT_FILE
     banner()
     console.print(Panel("[bold cyan]CARREGAR PROJECTO[/bold cyan]", border_style="cyan"))
-    files = list(Path(".").glob("reaper_*.json"))
+
+    # Search in PROJECTS_DIR + current dir
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    files_set = {}
+    for f in Path(PROJECTS_DIR).glob("reaper_*.json"):
+        files_set[str(f)] = f
+    for f in Path(".").glob("reaper_*.json"):
+        if str(f.resolve()) not in {str(Path(k).resolve()) for k in files_set}:
+            files_set[str(f)] = f
+    files = sorted(files_set.values(), key=lambda f: f.stat().st_mtime, reverse=True)
+
     if not files:
-        console.print("[yellow]Nenhum projecto encontrado nesta directoria.[/yellow]")
+        console.print(f"[yellow]Nenhum projecto encontrado em {PROJECTS_DIR}[/yellow]")
         pause(); return
+
     t = Table(box=box.SIMPLE_HEAD, border_style="dim")
     t.add_column("#", style="bold cyan", width=4)
-    t.add_column("Ficheiro"); t.add_column("Modificado", style="dim")
+    t.add_column("Projecto",  style="bold white", width=30)
+    t.add_column("Alvo",      style="yellow",      width=18)
+    t.add_column("Modificado",style="dim",          width=16)
+    t.add_column("Progresso", style="green",        width=10)
+
     for i, f in enumerate(files, 1):
         mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        t.add_row(str(i), f.name, mtime)
+        try:
+            with open(f) as fh:
+                data = json.load(fh)
+            proj_name = data.get("name", f.stem)
+            proj_target = data.get("target", "—")
+            # Count filled phases
+            filled = sum(
+                1 for pid in data.get("phases", {}).values()
+                if any(str(v).strip() for v in pid.values())
+            )
+            progress = f"{filled}/7 fases"
+        except Exception:
+            proj_name = f.stem
+            proj_target = "—"
+            progress = "—"
+        t.add_row(str(i), proj_name, proj_target, mtime, progress)
+
     console.print(t)
+    console.print(f"[dim]Pasta de projectos: {PROJECTS_DIR}[/dim]")
+    console.print()
+
     ch = Prompt.ask("[cyan]Número (ENTER para cancelar)[/cyan]", default="")
     if ch.isdigit() and 1 <= int(ch) <= len(files):
-        with open(files[int(ch)-1]) as f:
+        chosen = files[int(ch)-1]
+        with open(chosen) as f:
             PROJECT = json.load(f)
-        PROJECT_FILE = str(files[int(ch)-1])
-        console.print(f"\n[green]✔ Projecto carregado.[/green]")
+        PROJECT_FILE = str(chosen)
+        console.print(f"\n[green]✔ Projecto carregado:[/green] [bold]{PROJECT['name']}[/bold]")
+        console.print(f"[dim]Alvo: {PROJECT['target']}  |  Data: {PROJECT['date']}[/dim]")
         pause()
 
 # ── Menu de Fase ─────────────────────────────────────────────
@@ -872,6 +891,44 @@ def run_tool(ph, color, tool):
     else:
         console.print(f"[dim]Este comando não necessita de parâmetros adicionais.[/dim]\n")
 
+    # ── Verificação inteligente (theHarvester) ──────────────
+    if tool.get("smart_check") == "harvester":
+        import re as _re
+        _tval = values.get("dominio", "")
+        _is_ip = bool(_re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", _tval.split("/")[0]))
+        if _is_ip:
+            console.print()
+            console.print(Panel(
+                f"[yellow]⚠ [bold]{_tval}[/bold] é um IP — theHarvester é para domínios públicos.[/yellow]\n\n"
+                f"[cyan]Para IPs usa:[/cyan]\n"
+                f"  • nmap -sn {_tval}\n"
+                f"  • netdiscover -r {_tval}/24\n"
+                f"  • nmap -sV -sC {_tval}",
+                border_style="yellow", title="[yellow]IP detectado[/yellow]"
+            ))
+            console.print()
+            _ch2 = Prompt.ask(
+                "  [1] Voltar (recomendado)\n"
+                "  [2] Continuar mesmo assim\n"
+                "  [3] Continuar com fontes mínimas\n\nEscolha"
+            ).strip()
+            if _ch2 == "1":
+                _pause()
+                return None
+            elif _ch2 == "3":
+                values["fonte"] = "duckduckgo,hackertarget"
+        else:
+            if values.get("fonte","").strip() == "all":
+                console.print()
+                console.print(Panel(
+                    "[yellow]⚠ -b all vai dar muitos erros de API key.[/yellow]\n"
+                    "[cyan]Recomendado:[/cyan] google,bing,duckduckgo,crtsh,hackertarget,rapiddns",
+                    border_style="yellow"
+                ))
+                _ch3 = Prompt.ask("  [1] Usar fontes recomendadas\n  [2] Manter -b all\n\nEscolha").strip()
+                if _ch3 == "1":
+                    values["fonte"] = "google,bing,duckduckgo,crtsh,hackertarget,rapiddns"
+
     # Montar comando final
     cmd = tool["cmd"]
     for k, v in values.items():
@@ -899,8 +956,11 @@ def run_tool(ph, color, tool):
         try:
             subprocess.run(cmd, shell=True)
         except KeyboardInterrupt:
-            console.print("\n[yellow]Interrompido pelo utilizador.[/yellow]")
-        console.print(Rule(style="dim green"))
+            console.print("\n[yellow]Interrompido. A voltar ao menu...[/yellow]")
+        except Exception as _ex:
+            console.print(f"\n[red]Erro ao executar: {_ex}[/red]")
+        finally:
+            console.print(Rule(style="dim green"))
 
     if ch in ["2", "3"]:
         phase_data = PROJECT["phases"].get(str(ph["id"]), {})
@@ -1344,22 +1404,6 @@ ATTACK_TREE = {
                     "fail":    ["web_sqli"]
                 },
                 "hints": "Mais lento mas encontra mais — usa após gobuster falhar"
-            },
-            {
-                "name": "FFUF — fuzzing rápido",
-                "desc": "Fuzzer ultra-rápido — directorias, parâmetros ou vhosts",
-                "params": [
-                    {"key": "url",      "label": "URL com FUZZ (ex: http://alvo/FUZZ)", "default": "http://{TARGET}/FUZZ"},
-                    {"key": "wordlist", "label": "Wordlist",                             "default": "/usr/share/wordlists/dirb/common.txt"},
-                    {"key": "fc",       "label": "Filtrar códigos (ex: 404)",            "default": "404"},
-                    {"key": "threads",  "label": "Threads",                              "default": "40"},
-                ],
-                "cmd": "ffuf -u {url} -w {wordlist} -fc {fc} -t {threads}",
-                "followup": {
-                    "success": ["web_analyse_dirs"],
-                    "fail":    ["web_sqli"]
-                },
-                "hints": "Coloca FUZZ onde queres fazer fuzzing:\n   Directorias: http://alvo/FUZZ\n   Parâmetros: http://alvo/page.php?id=FUZZ\n   -fc 404 filtra not found | -mc 200 mostra só OK"
             },
             {
                 "name": "WPScan — WordPress",
@@ -1817,7 +1861,7 @@ ATTACK_TREE = {
         "label": "WordPress",
         "color": "bright_blue",
         "icon": "📝",
-        "detect": lambda ports, banners: "wordpress" in banners or "wp-content" in banners or "wp-login" in banners,
+        "detect": lambda ports, banners: any(s in banners for s in ["wordpress","wp-content","wp-login","wp-json","xmlrpc.php","wp-admin"]) or (any(p in ports for p in ["80","443","8080"]) and "wordpress" in banners),
         "attacks": [
             {
                 "name": "WPScan — enumeração completa",
@@ -2889,7 +2933,13 @@ def _run_nmap_live(project, save_fn):
             output_lines.append(line)
         proc.wait()
     except KeyboardInterrupt:
-        console.print("\n[yellow]Scan interrompido.[/yellow]")
+        console.print("\n[yellow]Scan interrompido. A voltar ao menu...[/yellow]")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    except Exception as _ex:
+        console.print(f"\n[red]Erro durante o scan: {_ex}[/red]")
 
     console.print(Rule(style="dim green"))
     scan_output = "".join(output_lines)
@@ -3181,8 +3231,11 @@ def _run_attack(attack, target, color, project, save_fn):
         try:
             subprocess.run(cmd, shell=True)
         except KeyboardInterrupt:
-            console.print("\n[yellow]Interrompido.[/yellow]")
-        console.print(Rule(style="dim green"))
+            console.print("\n[yellow]Interrompido. A voltar ao menu...[/yellow]")
+        except Exception as _ex:
+            console.print(f"\n[red]Erro ao executar: {_ex}[/red]")
+        finally:
+            console.print(Rule(style="dim green"))
         console.print()
 
     if ch in ["2", "3"]:
@@ -3242,5 +3295,9 @@ if __name__ == "__main__":
     try:
         main_menu()
     except KeyboardInterrupt:
-        console.print("\n\n[bold red]Interrompido. Sessão terminada.[/bold red]\n")
+        console.print("\n\n[bold red]Sessão terminada. Stay sharp.[/bold red]\n")
         sys.exit(0)
+    except Exception as _e:
+        console.print(f"\n[red]Erro inesperado: {_e}[/red]")
+        console.print("[dim]Reinicia o REAPER com: python3 reaper.py[/dim]\n")
+        sys.exit(1)
