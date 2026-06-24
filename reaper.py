@@ -78,17 +78,18 @@ TOOL_DEFINITIONS = {
             "name": "netdiscover",
             "desc": "Descoberta de hosts na rede local",
             "params": [
-                {"key": "rede", "label": "Rede (ex: 192.168.1.0/24)", "default": ""},
+                {"key": "rede", "label": "Rede (ex: 192.168.1.0/24)", "default": "{NET24}"},
             ],
             "cmd": "netdiscover -r {rede}",
         },
         {
             "name": "ping sweep (nmap)",
-            "desc": "Hosts activos na rede",
+            "desc": "Hosts activos na rede — escolhe modo e âmbito",
             "params": [
-                {"key": "rede", "label": "Rede (ex: 192.168.1.0/24)", "default": ""},
+                {"key": "rede", "label": "Rede / Alvo", "default": "{NET24}"},
             ],
             "cmd": "nmap -sn {rede}",
+            "smart_check": "nmap_sweep",
         },
         {
             "name": "traceroute",
@@ -104,11 +105,12 @@ TOOL_DEFINITIONS = {
     2: [
         {
             "name": "nmap básico",
-            "desc": "Versões, scripts padrão e SO",
+            "desc": "Versões, scripts padrão e SO — builder de flags interactivo",
             "params": [
                 {"key": "alvo", "label": "IP / Domínio alvo", "default": "{TARGET}"},
             ],
-            "cmd": "nmap -sV -sC -O {alvo}",
+            "cmd": "nmap {alvo}",
+            "smart_check": "nmap_builder",
         },
         {
             "name": "nmap completo",
@@ -648,9 +650,14 @@ def save_project():
             json.dump(PROJECT, f, indent=2, ensure_ascii=False)
 
 def resolve_defaults(params, target):
-    """Substitui {TARGET} nos defaults pelo alvo do projecto."""
+    """Substitui {TARGET} e {NET24} nos defaults pelo alvo do projecto."""
+    import re as _re
+    # Derivar rede /24 a partir do IP
+    ip_match = _re.match(r"(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}", target)
+    net24 = f"{ip_match.group(1)}.0/24" if ip_match else ""
     for p in params:
         p["default"] = p["default"].replace("{TARGET}", target)
+        p["default"] = p["default"].replace("{NET24}", net24)
     return params
 
 # ── Banner ───────────────────────────────────────────────────
@@ -834,6 +841,92 @@ def phase_menu(phase_id):
         elif ch == view_opt: view_phase_data(ph, color)
 
 # ── Selector de Ferramentas ──────────────────────────────────
+def _tool_status(ph_id, tool_name):
+    """Devolve o estado guardado de uma ferramenta."""
+    key = f"_tool_status_{tool_name.replace(' ','_')}"
+    return PROJECT["phases"].get(str(ph_id), {}).get(key, "")
+
+def _set_tool_status(ph_id, tool_name, status, cmd="", ts=""):
+    """Guarda o estado de uma ferramenta na fase."""
+    key     = f"_tool_status_{tool_name.replace(' ','_')}"
+    ts_key  = f"_tool_ts_{tool_name.replace(' ','_')}"
+    cmd_key = f"_tool_cmd_{tool_name.replace(' ','_')}"
+    phase_data = PROJECT["phases"].get(str(ph_id), {})
+    phase_data[key]     = status
+    phase_data[ts_key]  = ts
+    phase_data[cmd_key] = cmd
+    PROJECT["phases"][str(ph_id)] = phase_data
+    save_project()
+
+def _status_badge(status):
+    """Devolve badge visual para o estado."""
+    return {
+        "done":    "[bold green]✔ Feito[/bold green]",
+        "failed":  "[bold red]✘ Falhou[/bold red]",
+        "partial": "[bold yellow]→ Parcial[/bold yellow]",
+    }.get(status, "[dim]○[/dim]")
+
+def _suggest_next(ph_id, tool_name, color):
+    """Sugere próximo passo após sucesso."""
+    # Mapa de sugestões por ferramenta
+    next_map = {
+        "ping sweep (nmap)":    (2, "nmap básico",       "Tens hosts — faz scan completo ao alvo"),
+        "nmap básico":          (3, "gobuster",          "Portos abertos — enumera serviços web"),
+        "nmap completo":        (3, "gobuster",          "Scan completo feito — passa à enumeração"),
+        "whois":                (1, "theHarvester",      "Continua recolha OSINT"),
+        "dig":                  (1, "theHarvester",      "DNS mapeado — recolhe mais OSINT"),
+        "gobuster":             (3, "nikto",             "Directorias encontradas — scan de vulns web"),
+        "feroxbuster":          (3, "nikto",             "Directorias encontradas — scan de vulns web"),
+        "nikto":                (4, "searchsploit",      "Vulns encontradas — procura exploits"),
+        "enum4linux":           (5, "hydra SSH",         "Users enumerados — tenta brute force"),
+        "wpscan":               (5, "hydra HTTP form",   "WordPress mapeado — tenta credenciais"),
+        "nmap scripts vuln":    (4, "searchsploit",      "Vulnerabilidades detectadas — procura exploits"),
+        "searchsploit":         (5, "Metasploit",        "Exploit encontrado — hora de explorar"),
+        "hydra SSH":            (6, "sudo -l",           "Acesso obtido — verifica privilégios"),
+        "hydra HTTP form":      (6, "sudo -l",           "Acesso obtido — verifica privilégios"),
+        "sqlmap":               (6, "linpeas (local)",   "SQLi explorado — verifica escalada"),
+        "sudo -l":              (6, "GTFObins — explorar sudo", "Verifica GTFObins para o binário"),
+        "SUID binários":        (6, "SUID — explorar binário",  "Binário SUID — tenta explorar"),
+        "linpeas (remoto)":     (6, "sudo -l",           "Analisa o output do linpeas"),
+        "linpeas (local)":      (6, "sudo -l",           "Analisa o output do linpeas"),
+    }
+
+    if tool_name in next_map:
+        next_phase, next_tool, reason = next_map[tool_name]
+        phase_names = {1:"RECONHECIMENTO",2:"SCANNING",3:"ENUMERAÇÃO",
+                       4:"ANÁLISE VULNS",5:"EXPLORAÇÃO",6:"PÓS-EXPLORAÇÃO",7:"RELATÓRIO"}
+        console.print()
+        pname = phase_names.get(next_phase,"")
+        console.print(Panel(
+            f"[bold green]\u2714 Bom trabalho!\n\n"
+            f"[cyan]Próximo passo sugerido:[/cyan]\n"
+            f"  Fase {next_phase} — {pname}  →  [bold]{next_tool}[/bold]\n\n"
+            f"[dim]{reason}[/dim]",
+            title="[bold green]\U0001f4a1 REAPER SUGERE[/bold green]",
+            border_style="green"
+        ))
+        console.print()
+
+        # Oferecer ir directamente para o passo sugerido
+        go = Prompt.ask(
+            "  [1] Ir para o passo sugerido agora\n"
+            "  [B] Voltar ao menu\n\nEscolha",
+            default="B"
+        ).strip().upper()
+
+        if go == "1":
+            # Navegar para a fase e ferramenta sugeridas
+            target_ph = PHASES[next_phase - 1]
+            target_color = PHASE_COLORS[next_phase - 1]
+            target_tools = TOOL_DEFINITIONS.get(next_phase, [])
+            # Encontrar a ferramenta sugerida
+            target_tool = next((t for t in target_tools if t["name"] == next_tool), None)
+            if target_tool:
+                run_tool(target_ph, target_color, target_tool)
+            else:
+                # Ferramenta não encontrada directamente — ir para o menu da fase
+                phase_menu(next_phase)
+
 def tool_selector(ph, color, tools):
     while True:
         banner()
@@ -892,7 +985,179 @@ def run_tool(ph, color, tool):
         console.print(f"[dim]Este comando não necessita de parâmetros adicionais.[/dim]\n")
 
     # ── Verificação inteligente (theHarvester) ──────────────
-    if tool.get("smart_check") == "harvester":
+    if tool.get("smart_check") == "nmap_sweep":
+        # Oferecer modos e âmbito antes de correr
+        console.print()
+        console.print(Panel(
+            f"[cyan]Alvo actual:[/cyan] [bold yellow]{values.get('rede','')}[/bold yellow]",
+            title="[cyan]Ping Sweep — Configurar scan[/cyan]", border_style="cyan"
+        ))
+        console.print()
+
+        # Modo de scan
+        console.print(f"[cyan]Modo de scan:[/cyan]")
+        t_mode = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+        t_mode.add_column(style="bold cyan", width=6); t_mode.add_column()
+        t_mode.add_row("[1]", "-sn          Só hosts activos (sem scan de portos) — rápido")
+        t_mode.add_row("[2]", "-sn --open   Só hosts activos com portos abertos")
+        t_mode.add_row("[3]", "-sV          Hosts + versões de serviços — mais lento")
+        t_mode.add_row("[4]", "-sV -sC -O   Hosts + versões + SO + scripts — completo")
+        t_mode.add_row("[5]", "Personalizado — escolho as flags manualmente")
+        console.print(t_mode)
+        mode_ch = Prompt.ask("[cyan]Modo[/cyan]", default="1").strip()
+        flags_map = {
+            "1": "-sn",
+            "2": "-sn --open",
+            "3": "-sV -T4",
+            "4": "-sV -sC -O -T4",
+        }
+        if mode_ch in flags_map:
+            flags = flags_map[mode_ch]
+        elif mode_ch == "5":
+            flags = Prompt.ask("[cyan]Flags nmap[/cyan]", default="-sn")
+        else:
+            flags = "-sn"
+
+        # Âmbito — se for /24 avisar e oferecer alternativas
+        rede_val = values.get("rede", "")
+        import re as _re
+        if rede_val.endswith("/24"):
+            console.print()
+            _base24 = values.get("rede","").rsplit(".0/24",1)[0]
+            console.print()
+            console.print(Panel(
+                "[yellow]\u26a0 Estás a varrer uma /24 — pode devolver até 254 hosts.[/yellow]\n\n"
+                "[cyan]Âmbito:[/cyan]\n"
+                "  [1] Manter /24 (todos)\n"
+                "  [2] Intervalo personalizado\n"
+                "  [3] Sub-rede /25  (metade — 126 hosts)\n"
+                "  [4] Sub-rede /26  (um quarto — 62 hosts)\n"
+                "  [5] Só o alvo principal\n"
+                "  [6] Introduzir manualmente",
+                border_style="yellow", title="[yellow]Rede /24 detectada[/yellow]"
+            ))
+            scope_ch = Prompt.ask("[yellow]Âmbito[/yellow]", default="1").strip()
+            base = rede_val.rsplit(".0/24", 1)[0]
+            if scope_ch == "2":
+                fim = Prompt.ask(f"[cyan]Intervalo final (ex: {base}.1-50)[/cyan]", default=f"{base}.1-50")
+                values["rede"] = fim
+            elif scope_ch == "3":
+                values["rede"] = f"{base}.0/25"
+            elif scope_ch == "4":
+                values["rede"] = f"{base}.0/26"
+            elif scope_ch == "5":
+                values["rede"] = f"{base}.1"
+            elif scope_ch == "6":
+                values["rede"] = Prompt.ask("[cyan]Rede / IP / Intervalo[/cyan]", default=rede_val)
+
+        # Reconstruir comando com flags escolhidas
+        cmd = f"nmap {flags} {values['rede']}"
+        console.print()
+        console.print(Panel(f"[bold green]{cmd}[/bold green]", title="Comando Final", border_style="green"))
+        console.print()
+
+    elif tool.get("smart_check") == "nmap_builder":
+        # Builder interactivo de flags nmap
+        console.print()
+        console.print(Panel(
+            "[cyan]Constrói o teu comando nmap seleccionando as flags:[/cyan]",
+            border_style="cyan", title="[cyan]nmap — Builder de Flags[/cyan]"
+        ))
+        console.print()
+
+        flags_selected = []
+
+        # Tipo de scan
+        console.print("[cyan]1. Tipo de scan:[/cyan]")
+        t1 = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+        t1.add_column(style="bold cyan", width=6); t1.add_column()
+        t1.add_row("[1]", "-sS   SYN scan (stealth) — requer root")
+        t1.add_row("[2]", "-sT   TCP connect — sem root")
+        t1.add_row("[3]", "-sA   ACK scan — detectar firewall")
+        t1.add_row("[4]", "-sn   Só ping — sem portos")
+        console.print(t1)
+        ch1 = Prompt.ask("Escolha", default="1").strip()
+        tipo_map = {"1": "-sS", "2": "-sT", "3": "-sA", "4": "-sn"}
+        flags_selected.append(tipo_map.get(ch1, "-sS"))
+
+        if ch1 != "4":
+            # Portos
+            console.print()
+            console.print("[cyan]2. Portos:[/cyan]")
+            t2 = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+            t2.add_column(style="bold cyan", width=6); t2.add_column()
+            t2.add_row("[1]", "Top 1000 portos (padrão)")
+            t2.add_row("[2]", "-p-         Todos os 65535 portos")
+            t2.add_row("[3]", "--top-ports 100   Top 100")
+            t2.add_row("[4]", "-p 80,443,22,21   Portos específicos")
+            console.print(t2)
+            ch2 = Prompt.ask("Escolha", default="1").strip()
+            if ch2 == "2":   flags_selected.append("-p-")
+            elif ch2 == "3": flags_selected.append("--top-ports 100")
+            elif ch2 == "4":
+                portos = Prompt.ask("Portos (ex: 22,80,443)", default="22,80,443")
+                flags_selected.append(f"-p {portos}")
+
+            # Detecção
+            console.print()
+            console.print("[cyan]3. Detecção (podes combinar):[/cyan]")
+            t3 = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+            t3.add_column(style="bold cyan", width=6); t3.add_column()
+            t3.add_row("[1]", "-sV   Versões de serviços")
+            t3.add_row("[2]", "-O    Sistema Operativo")
+            t3.add_row("[3]", "-sC   Scripts padrão NSE")
+            t3.add_row("[4]", "-A    Tudo (sV + O + sC + traceroute)")
+            t3.add_row("[5]", "Nenhuma detecção extra")
+            console.print(t3)
+            ch3 = Prompt.ask("Escolha (ex: 1,2,3 ou 4)", default="1").strip()
+            det_map = {"1": "-sV", "2": "-O", "3": "-sC", "4": "-A"}
+            if ch3 == "4":
+                flags_selected.append("-A")
+            elif ch3 != "5":
+                for c in ch3.split(","):
+                    c = c.strip()
+                    if c in det_map:
+                        flags_selected.append(det_map[c])
+
+            # Velocidade
+            console.print()
+            console.print("[cyan]4. Velocidade (-T):[/cyan]")
+            t4 = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+            t4.add_column(style="bold cyan", width=6); t4.add_column()
+            t4.add_row("[1]", "-T1   Muito lento (furtivo)")
+            t4.add_row("[2]", "-T2   Lento")
+            t4.add_row("[3]", "-T3   Normal (padrão)")
+            t4.add_row("[4]", "-T4   Rápido (recomendado labs)")
+            t4.add_row("[5]", "-T5   Muito rápido (pode falhar)")
+            console.print(t4)
+            ch4 = Prompt.ask("Escolha", default="4").strip()
+            t_map = {"1":"-T1","2":"-T2","3":"-T3","4":"-T4","5":"-T5"}
+            flags_selected.append(t_map.get(ch4, "-T4"))
+
+            # Output
+            console.print()
+            console.print("[cyan]5. Guardar output?:[/cyan]")
+            t5 = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
+            t5.add_column(style="bold cyan", width=6); t5.add_column()
+            t5.add_row("[1]", "Não guardar")
+            t5.add_row("[2]", "-oN  Guardar em ficheiro .txt")
+            t5.add_row("[3]", "-oA  Guardar em todos os formatos")
+            console.print(t5)
+            ch5 = Prompt.ask("Escolha", default="2").strip()
+            import datetime as _dt2
+            ts2 = _dt2.datetime.now().strftime("%Y%m%d_%H%M")
+            alvo_safe = values.get("alvo","alvo").replace(".","_").replace("/","_")
+            if ch5 == "2":   flags_selected.append(f"-oN nmap_{alvo_safe}_{ts2}.txt")
+            elif ch5 == "3": flags_selected.append(f"-oA nmap_{alvo_safe}_{ts2}")
+
+        # Reconstruir comando
+        flags_str = " ".join(flags_selected)
+        cmd = f"nmap {flags_str} {values.get('alvo','')}"
+        console.print()
+        console.print(Panel(f"[bold green]{cmd}[/bold green]", title="Comando Construído", border_style="green"))
+        console.print()
+
+    elif tool.get("smart_check") == "harvester":
         import re as _re
         _tval = values.get("dominio", "")
         _is_ip = bool(_re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", _tval.split("/")[0]))
@@ -939,41 +1204,47 @@ def run_tool(ph, color, tool):
                         title="Comando Gerado", border_style="green"))
     console.print()
 
-    # Opções
+    # ── Menu de acção ────────────────────────────────────────
     opts = Table(box=box.SIMPLE, show_header=False, padding=(0,2))
     opts.add_column(style="bold cyan", width=6); opts.add_column()
-    opts.add_row("[1]", "Executar agora neste terminal")
-    opts.add_row("[2]", "Guardar comando nas notas da fase")
-    opts.add_row("[3]", "Executar E guardar")
+    opts.add_row("[1]", "Executar agora")
+    opts.add_row("[2]", "Guardar comando (antes de executar)")
+    opts.add_row("[3]", "Guardar → Executar → Guardar resultado  [dim](recomendado)[/dim]")
+    opts.add_row("[4]", "Executar E guardar")
     opts.add_row("[B]", "Voltar sem fazer nada")
     console.print(opts)
 
     ch = Prompt.ask(f"[{color}]Acção[/{color}]").strip().upper()
 
-    if ch in ["1", "3"]:
+    def _save_cmd(label="COMANDO"):
+        """Guarda o comando nas notas com label."""
+        phase_data = PROJECT["phases"].get(str(ph["id"]), {})
+        existing   = phase_data.get("notas", "")
+        ts         = datetime.datetime.now().strftime("%H:%M:%S")
+        entry      = f"[{ts}] [{label}] {tool['name']}: {cmd}"
+        phase_data["notas"] = (existing + "\n" + entry).strip()
+        PROJECT["phases"][str(ph["id"])] = phase_data
+        save_project()
+
+    def _run_cmd():
+        """Executa o comando e devolve True se não foi interrompido."""
         console.print(f"\n[yellow]A executar:[/yellow] [bold green]{cmd}[/bold green]\n")
         console.print(Rule(style="dim green"))
+        ok = True
         try:
             subprocess.run(cmd, shell=True)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrompido. A voltar ao menu...[/yellow]")
+            ok = False
         except Exception as _ex:
             console.print(f"\n[red]Erro ao executar: {_ex}[/red]")
+            ok = False
         finally:
             console.print(Rule(style="dim green"))
+        return ok
 
-    if ch in ["2", "3"]:
-        phase_data = PROJECT["phases"].get(str(ph["id"]), {})
-        existing   = phase_data.get("notas", "")
-        ts         = datetime.datetime.now().strftime("%H:%M:%S")
-        entry      = f"[{ts}] {tool['name']}: {cmd}"
-        phase_data["notas"] = (existing + "\n" + entry).strip()
-        PROJECT["phases"][str(ph["id"])] = phase_data
-        save_project()
-        console.print(f"\n[green]✔ Comando guardado nas notas da fase {ph['id']}.[/green]")
-
-    # ── Marcar estado da ferramenta ──────────────────────────
-    if ch in ["1", "3"]:
+    def _ask_result():
+        """Pergunta como correu e marca estado + sugere próximo."""
         console.print()
         res = Prompt.ask(
             f"[{color}]Como correu?[/{color}]\n"
@@ -985,13 +1256,46 @@ def run_tool(ph, color, tool):
         ts_now = datetime.datetime.now().strftime("%d/%m %H:%M")
         if res == "1":
             _set_tool_status(ph["id"], tool["name"], "done", cmd, ts_now)
-            console.print(f"[green]✔ Marcado como Feito.[/green]")
+            _save_cmd("RESULTADO: SUCESSO")
+            console.print(f"[green]✔ Marcado como Feito — guardado no relatório.[/green]")
+            _suggest_next(ph["id"], tool["name"], color)
         elif res == "2":
             _set_tool_status(ph["id"], tool["name"], "failed", cmd, ts_now)
-            console.print(f"[red]✘ Marcado como Falhou.[/red]")
+            _save_cmd("RESULTADO: FALHOU")
+            console.print(f"[red]✘ Marcado como Falhou — guardado no relatório.[/red]")
         elif res == "3":
             _set_tool_status(ph["id"], tool["name"], "partial", cmd, ts_now)
-            console.print(f"[yellow]→ Marcado como Parcial.[/yellow]")
+            _save_cmd("RESULTADO: PARCIAL")
+            console.print(f"[yellow]→ Marcado como Parcial — guardado no relatório.[/yellow]")
+
+    if ch == "1":
+        _run_cmd()
+        _ask_result()
+
+    elif ch == "2":
+        _save_cmd("PRÉ-EXECUÇÃO")
+        console.print(f"\n[green]✔ Comando guardado nas notas da fase {ph['id']} (antes de executar).[/green]")
+
+    elif ch == "3":
+        # Guardar antes
+        _save_cmd("PRÉ-EXECUÇÃO")
+        console.print(f"\n[green]✔ Comando guardado (antes).[/green]")
+        # Executar
+        ok = _run_cmd()
+        # Perguntar resultado e guardar depois
+        if ok:
+            _ask_result()
+        else:
+            _set_tool_status(ph["id"], tool["name"], "partial", cmd,
+                             datetime.datetime.now().strftime("%d/%m %H:%M"))
+            _save_cmd("RESULTADO: INTERROMPIDO")
+
+    elif ch == "4":
+        ok = _run_cmd()
+        if ok:
+            _save_cmd("EXECUTADO")
+            console.print(f"\n[green]✔ Guardado nas notas da fase {ph['id']}.[/green]")
+        _ask_result()
 
     pause()
 
